@@ -22,6 +22,7 @@ from openhands.app_server.sandbox.sandbox_spec_service import (
 from openhands.app_server.services.injector import InjectorState
 
 _global_docker_client: docker.DockerClient | None = None
+_pull_lock = asyncio.Lock()
 _logger = logging.getLogger(__name__)
 
 
@@ -69,10 +70,15 @@ class DockerSandboxSpecServiceInjector(SandboxSpecServiceInjector):
         self, state: InjectorState, request: Request | None = None
     ) -> AsyncGenerator[SandboxSpecService, None]:
         if self.pull_if_missing:
-            await self.pull_missing_specs()
-            # Prevent repeated checks - more efficient but it does mean if you
-            # delete a docker image outside the app you need to restart
-            self.pull_if_missing = False
+            async with _pull_lock:
+                if self.pull_if_missing:
+                    try:
+                        await self.pull_missing_specs()
+                    finally:
+                        # Prevent repeated checks - more efficient but it does mean if you
+                        # delete a docker image outside the app you need to restart
+                        # We set this to False even on failure to avoid infinite retry loops
+                        self.pull_if_missing = False
         yield PresetSandboxSpecService(specs=self.specs)
 
     async def pull_missing_specs(self):
@@ -86,10 +92,28 @@ class DockerSandboxSpecServiceInjector(SandboxSpecServiceInjector):
                 docker_client.images.get(spec.id)
             except docker.errors.ImageNotFound:
                 _logger.info(f'⬇️  Pulling Docker Image: {spec.id}')
-                await self._pull_with_progress_logging(docker_client, spec.id)
-                _logger.info(f'⬇️  Finished Pulling Docker Image: {spec.id}')
+                try:
+                    await self._pull_with_progress_logging(docker_client, spec.id)
+                    _logger.info(f'⬇️  Finished Pulling Docker Image: {spec.id}')
+                except Exception as exc:
+                    # Double check if it was pulled by another process/thread in the meantime
+                    try:
+                        docker_client.images.get(spec.id)
+                        _logger.info(
+                            f'✅ Docker Image {spec.id} found after pull attempt failed, likely pulled by another request.'
+                        )
+                    except docker.errors.ImageNotFound:
+                        # Re-raise original error if still missing
+                        _logger.error(f'❌ Failed to pull Docker Image: {spec.id} : {exc}')
+                        raise
         except docker.errors.APIError as exc:
-            raise SandboxError(f'Error Getting Docker Image: {spec.id}') from exc
+            # Handle cases where the API call itself fails (e.g. socket timeout during check)
+            _logger.error(f'⚠️ Error interacting with Docker API for {spec.id}: {exc}')
+            try:
+                docker_client = get_docker_client()
+                docker_client.images.get(spec.id)
+            except Exception:
+                raise SandboxError(f'Error Getting Docker Image: {spec.id}') from exc
 
     async def _pull_with_progress_logging(
         self, docker_client: docker.DockerClient, image_id: str
