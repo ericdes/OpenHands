@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import platform
+import random
 import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -41,6 +43,10 @@ from openhands.app_server.utils.docker_utils import (
 
 _logger = logging.getLogger(__name__)
 STARTUP_GRACE_SECONDS = 15
+SAFE_PORT_RANGE = (30000, 49151)
+IS_WINDOWS_OR_WSL = os.name == 'nt' or platform.release().endswith(
+    'microsoft-standard-WSL2'
+)
 
 
 class VolumeMount(BaseModel):
@@ -87,24 +93,22 @@ class DockerSandboxService(SandboxService):
     use_host_network: bool = False
 
     def _find_unused_port(self) -> int:
-        """Find an unused port on the host machine.
-
-        Windows often reserves ports in the 49152+ range (dynamic range).
-        We prefer picking ports in the 10000-49151 range to reduce conflict risks.
-        """
-        import random
-
-        # Try to pick a random port in a safer range
-        for _ in range(10):
-            port = random.randint(10000, 49151)
-            try:
+        """Find an unused port on the host machine."""
+        if IS_WINDOWS_OR_WSL:
+            # On Windows/WSL2, pick a random port from the safe range to avoid conflicts
+            # with reserved port ranges (like Hyper-V).
+            for _ in range(100):
+                port = random.randint(SAFE_PORT_RANGE[0], SAFE_PORT_RANGE[1])
+                # Check if port is in use
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('', port))
-                    return port
-            except socket.error:
-                continue
+                    try:
+                        s.bind(('', port))
+                        return port
+                    except OSError:
+                        continue
+            raise SandboxError('Could not find an available port in the safe range')
 
-        # Fallback to default behavior if we can't find one in the safe range
+        # Default behavior: let the OS pick
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
             s.listen(1)

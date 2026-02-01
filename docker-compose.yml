@@ -1,4 +1,3 @@
-
 services:
   openhands:
     build:
@@ -11,6 +10,8 @@ services:
       - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-31536c8-python}
       #- SANDBOX_USER_ID=${SANDBOX_USER_ID:-1234} # enable this only if you want a specific non-root sandbox user but you will have to manually adjust permissions of ~/.openhands for this user
       - WORKSPACE_MOUNT_PATH=${WORKSPACE_BASE:-$PWD/workspace}
+      - OH_SESSION_SECRET=${OH_SESSION_SECRET}
+      - OH_SECRET_KEY=${OH_SECRET_KEY}
     ports:
       - "3000:3000"
     extra_hosts:
